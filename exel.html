@@ -1,0 +1,748 @@
+<!doctype html>
+<html lang="vi">
+
+<head>
+    <meta charset="utf-8" />
+    <title>Attendance Heatmap Dashboard</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <script src="https://cdn.jsdelivr.net/npm/papaparse@5.4.1/papaparse.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+    <style>
+        :root {
+            --bg: #0f172a;
+            --card: #111827;
+            --text: #e5e7eb;
+            --muted: #94a3b8;
+            --accent: #3b82f6;
+            --border: #334155;
+        }
+
+        body {
+            margin: 0;
+            font-family: system-ui, -apple-system, Segoe UI, Roboto, Inter, Arial;
+            background: var(--bg);
+            color: var(--text);
+        }
+
+        .wrap {
+            max-width: 1300px;
+            margin: 24px auto;
+            padding: 16px;
+        }
+
+        .card {
+            background: var(--card);
+            border: 1px solid var(--border);
+            border-radius: 12px;
+            padding: 16px;
+            box-shadow: 0 2px 8px rgba(0, 0, 0, .2);
+            margin-bottom: 16px;
+        }
+
+        h1 {
+            margin: 0 0 12px;
+            font-size: 20px;
+        }
+
+        input,
+        select {
+            padding: 10px 12px;
+            border: 1px solid var(--border);
+            background: #0b1224;
+            color: var(--text);
+            border-radius: 8px;
+            outline: none;
+        }
+
+        button {
+            padding: 10px 14px;
+            background: var(--accent);
+            border: none;
+            color: white;
+            border-radius: 8px;
+            cursor: pointer;
+            font-weight: 600;
+            margin-right: 6px;
+        }
+
+        canvas {
+            background: #0b1224;
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            margin-top: 12px;
+        }
+
+        .actions {
+            margin-top: 8px;
+            display: flex;
+            justify-content: flex-end;
+            gap: 8px;
+        }
+    </style>
+</head>
+
+<body>
+    <div class="wrap">
+        <div class="card">
+            <h1>📊 Attendance Heatmap Dashboard</h1>
+            <label>Google Sheet ID:</label><br>
+            <input id="sheetId" placeholder="Dán ID Google Sheet..." style="width:100%;margin-bottom:8px" /><br>
+            <button id="btnFetch">Tải dữ liệu</button>
+            <div id="status" style="margin-top:8px;font-size:13px;color:var(--muted)">
+                Sheet: Attendance_Log + AT (từ F3)
+            </div>
+        </div>
+
+        <div class="card" id="chartSection" style="display:none">
+            <label for="daySelect">Chọn ngày điểm danh:</label>
+            <select id="daySelect"></select>
+
+            <div class="actions">
+                <button onclick="downloadCanvas('chartStudentsDay')">⬇️ Tải biểu đồ phần trăm</button>
+            </div>
+            <h2>Trạng thái & điểm phần trăm học viên (chính thức)</h2>
+            <canvas id="chartStudentsDay" height="150"></canvas>
+
+            <div class="actions">
+                <button onclick="downloadCanvas('chartHeatmap')">⬇️ Tải Heatmap</button>
+            </div>
+            <h2>5 ngày gần nhất - Heatmap trạng thái</h2>
+            <canvas id="chartHeatmap" height="150"></canvas>
+        </div>
+    </div>
+
+    <script>
+        const sheetAttendance = 'Attendance_Log';
+        const sheetAT = 'AT';
+        const range = 'F3:ZZ';
+        const btnFetch = document.getElementById('btnFetch');
+        const statusEl = document.getElementById('status');
+        const sheetIdInput = document.getElementById('sheetId');
+        const chartSection = document.getElementById('chartSection');
+        const daySelect = document.getElementById('daySelect');
+        const LIMIT_DATE = new Date(2025, 10, 3);
+
+        let attendanceData = [];
+        let atData = [];
+        let chartStudentsDay, chartHeatmap;
+
+        const STATUS_COLORS = {
+            'Đi Học': '#4CAF50',
+            'Vắng Học': '#F44336',
+            'Xem Record': '#9C27B0',
+            'Khác': '#E0E0E0'
+        };
+
+        const ALLOWED_STATUS = Object.keys(STATUS_COLORS);
+
+        function normalizeStatus(st) {
+            if (st === 'Nghỉ Học' || st === 'Nghỉ Phép') return 'Vắng Học';
+            return st;
+        }
+
+        // === Plugin: Legend hiển thị trong canvas ===
+        const legendPlugin = {
+            id: 'legendInCanvas',
+            afterDraw(chart) {
+                const { ctx, chartArea: { left, right, bottom } } = chart;
+                const items = Object.entries(STATUS_COLORS);
+                const boxSize = 12, gap = 18;
+                const startY = bottom + 135;
+                const fontSize = 12;
+                const totalWidth = items.reduce((s, [label]) => s + ctx.measureText(label).width + boxSize + gap, 0);
+                const startX = left + (right - left - totalWidth) / 2;
+
+                ctx.save();
+                ctx.font = `${fontSize}px system-ui`;
+                ctx.textBaseline = 'middle';
+                ctx.fillStyle = '#000';
+                let x = startX;
+                items.forEach(([label, color]) => {
+                    ctx.fillStyle = color;
+                    ctx.fillRect(x, startY - boxSize / 2, boxSize, boxSize);
+                    ctx.strokeStyle = '#1f2937';
+                    ctx.strokeRect(x, startY - boxSize / 2, boxSize, boxSize);
+                    ctx.fillStyle = '#000';
+                    ctx.fillText(label, x + boxSize + 5, startY);
+                    x += ctx.measureText(label).width + boxSize + gap;
+                });
+                ctx.restore();
+            }
+        };
+
+        // === Plugin: Logo ở góc trên bên phải ===
+        const logoPlugin = (type) => ({
+            id: 'logoPlugin',
+
+            // cấu hình tùy chọn
+            logo: {
+                src: 'LOGO_FHD_Blue.png',
+                width: 320,   // 👉 chỉnh width bạn muốn
+                height: 190,  // 👉 chỉnh height bạn muốn
+                opacity: 1
+            },
+
+            afterDraw(chart) {
+                const { ctx, chartArea } = chart;
+
+                if (!chart._logoImage) {
+                    const img = new Image();
+                    img.src = this.logo.src;
+
+                    chart._logoImage = img;
+                    img.onload = () => chart.draw(); // redraw sau khi load
+                    return;
+                }
+
+                const img = chart._logoImage;
+                if (!img.complete) return;
+
+                const w = this.logo.width;
+                const h = this.logo.height;
+
+                const x = chartArea.left - (type === 1 ? 110 : 80);
+                const y = chartArea.top - 145;
+
+                ctx.save();
+                ctx.globalAlpha = this.logo.opacity;
+                ctx.drawImage(img, x, y, w, h);
+                ctx.restore();
+            }
+        });
+
+        const bar3DPluginAbsent = {
+            id: 'bar3DEffectAbsent',
+            afterDatasetDraw(chart, args) {
+                const dataset = chart.data.datasets[args.index];
+
+                // Chỉ áp dụng cho dataset dạng BAR
+                if (dataset.type !== 'bar') return;
+
+                const meta = chart.getDatasetMeta(args.index);
+                const { ctx } = chart;
+
+                meta.data.forEach((bar, i) => {
+                    let baseColor = dataset.backgroundColor[i];
+                    if (!baseColor) return;
+
+                    // Chuẩn hoá màu
+                    baseColor = normalizeColor(baseColor);
+
+                    const topColor = shadeColor(baseColor, +18);
+                    const sideColor = shadeColor(baseColor, -25);
+
+                    const { x, y, base } = bar.getProps(['x', 'y', 'base'], true);
+                    const barWidth = bar.width;
+                    const half = barWidth / 2;
+                    const skew = 7;
+
+                    ctx.save();
+
+                    // Mặt phải
+                    ctx.fillStyle = sideColor;
+                    ctx.beginPath();
+                    ctx.moveTo(x + half, y);
+                    ctx.lineTo(x + half + skew, y - skew);
+                    ctx.lineTo(x + half + skew, base - skew);
+                    ctx.lineTo(x + half, base);
+                    ctx.closePath();
+                    ctx.fill();
+
+                    // Mặt trên
+                    ctx.fillStyle = topColor;
+                    ctx.beginPath();
+                    ctx.moveTo(x - half, y);
+                    ctx.lineTo(x + half, y);
+                    ctx.lineTo(x + half + skew, y - skew);
+                    ctx.lineTo(x - half + skew, y - skew);
+                    ctx.closePath();
+                    ctx.fill();
+
+                    ctx.restore();
+                });
+            }
+        };
+
+        // === Plugin Bar 3D lấy đúng màu từng cột ===
+        const bar3DPlugin = {
+            id: 'bar3DEffect',
+            afterDatasetDraw(chart, args) {
+                const dataset = chart.data.datasets[args.index];
+
+                // ⭐ Chỉ áp dụng cho dataset dạng BAR
+                if (dataset.type && dataset.type !== 'bar') return;
+                // ⭐ Nếu ChartJS tự gán mặc định, vẫn kiểm tra type bar
+                if (chart.config.type !== 'bar' && dataset.type !== 'bar') return;
+
+                const meta = chart.getDatasetMeta(args.index);
+                const { ctx } = chart;
+
+                meta.data.forEach((bar, i) => {
+                    let baseColor = dataset.backgroundColor[i];
+                    if (!baseColor) return;
+
+                    baseColor = normalizeColor(baseColor);
+
+                    const topColor = shadeColor(baseColor, +18);
+                    const sideColor = shadeColor(baseColor, -25);
+
+                    const { x, y, base } = bar.getProps(['x', 'y', 'base'], true);
+                    const barWidth = bar.width;
+                    const half = barWidth / 2;
+                    const skew = 7;
+
+                    ctx.save();
+
+                    // mặt phải
+                    ctx.fillStyle = sideColor;
+                    ctx.beginPath();
+                    ctx.moveTo(x + half, y);
+                    ctx.lineTo(x + half + skew, y - skew);
+                    ctx.lineTo(x + half + skew, base - skew);
+                    ctx.lineTo(x + half, base);
+                    ctx.closePath();
+                    ctx.fill();
+
+                    // mặt trên
+                    ctx.fillStyle = topColor;
+                    ctx.beginPath();
+                    ctx.moveTo(x - half, y);
+                    ctx.lineTo(x + half, y);
+                    ctx.lineTo(x + half + skew, y - skew);
+                    ctx.lineTo(x - half + skew, y - skew);
+                    ctx.closePath();
+                    ctx.fill();
+
+                    ctx.restore();
+                });
+            }
+        };
+
+
+        function normalizeColor(col) {
+            if (col.startsWith('#')) return col;
+            const m = col.match(/\d+/g).map(Number);
+            return "#" + m.map(x => x.toString(16).padStart(2, '0')).join('');
+        }
+
+        function shadeColor(color, percent) {
+            color = color.replace('#', '');
+            let R = parseInt(color.substring(0, 2), 16);
+            let G = parseInt(color.substring(2, 4), 16);
+            let B = parseInt(color.substring(4, 6), 16);
+            const t = percent < 0 ? 0 : 255;
+            const p = Math.abs(percent) / 100;
+
+            R = Math.round((t - R) * p + R);
+            G = Math.round((t - G) * p + G);
+            B = Math.round((t - B) * p + B);
+
+            return "#" + ((1 << 24) + (R << 16) + (G << 8) + B).toString(16).slice(1);
+        }
+
+        function parseDate(str) {
+            // str dạng "03/11" hoặc "03/11/2024"
+            const parts = str.split('/');
+            const day = parseInt(parts[0]);
+            const month = parseInt(parts[1]) - 1;
+            const year = parts[2] ? parseInt(parts[2]) : 2024; // nếu không có năm thì gán năm hiện tại
+            return new Date(year, month, day);
+        }
+
+        btnFetch.addEventListener('click', async () => {
+            const sheetId = sheetIdInput.value.trim();
+            if (!sheetId) return setStatus('⚠️ Nhập Google Sheet ID trước.');
+            await loadData(sheetId);
+        });
+
+        async function loadData(sheetId) {
+            setStatus('⏳ Đang tải dữ liệu...');
+            try {
+                const [attend, at] = await Promise.all([
+                    fetchCSV(sheetId, sheetAttendance),
+                    fetchCSV(sheetId, sheetAT)
+                ]);
+                attendanceData = attend;
+                atData = at;
+                if (!attendanceData.length || !atData.length) throw new Error('Không có dữ liệu hợp lệ.');
+                setStatus(`✅ Đã tải ${attendanceData.length} ngày Attendance_Log & ${atData.length} bản ghi AT.`);
+                renderDayOptions(attendanceData);
+            } catch (err) {
+                console.error(err);
+                setStatus('❌ ' + err.message);
+            }
+        }
+
+        async function fetchCSV(sheetId, sheetName) {
+            const url = `https://docs.google.com/spreadsheets/d/${sheetId}/gviz/tq?sheet=${sheetName}&range=${range}&tqx=out:csv`;
+            const res = await fetch(url);
+            if (!res.ok) throw new Error(`Không thể truy cập sheet ${sheetName}`);
+            const csv = await res.text();
+            const parsed = Papa.parse(csv, { header: true, skipEmptyLines: true });
+            let rows = parsed.data || [];
+            rows = rows.map(r => {
+                const cleaned = {};
+                for (const [k, v] of Object.entries(r)) {
+                    if (k?.trim() && v?.trim()) cleaned[k.trim()] = v.trim();
+                }
+                return cleaned;
+            })
+                .filter(r => r['Thông Tin Học Sinh'])
+                .filter(r => Object.keys(r).length > 0);
+            return rows;
+        }
+
+        function renderDayOptions(rows) {
+            const days = rows.map(r => r['Thông Tin Học Sinh']).filter(Boolean).reverse();;
+            daySelect.innerHTML = days.map(d => `<option value="${d}">${d}</option>`).join('');
+            daySelect.addEventListener('change', updateCharts);
+            chartSection.style.display = 'block';
+            updateCharts();
+        }
+
+        function updateCharts() {
+            const selectedDay = daySelect.value;
+            const todayRow = attendanceData.find(r => r['Thông Tin Học Sinh'] === selectedDay);
+            const todayAT = atData.find(r => r['Thông Tin Học Sinh'] === selectedDay);
+            if (!todayRow || !todayAT) return;
+            drawStudentsDayChart(todayRow, todayAT);
+            drawHeatmapChart();
+            generateAttendanceMessage(selectedDay, todayRow);
+        }
+
+        // === Biểu đồ thanh ngang có giá trị phần trăm ===
+        function drawStudentsDayChart(row, atRow) {
+            const entries = Object.entries(row).filter(([k]) => k !== 'Thông Tin Học Sinh');
+            const filtered = entries
+                .map(([name, status]) => [name, normalizeStatus(status)])  // normalize trước
+                .filter(([_, status]) => ALLOWED_STATUS.includes(status)); // lọc sau
+
+            const labels = filtered.map(([name]) => name);
+            const statuses = filtered.map(([_, status]) => status);
+            // console.log(statuses);
+            const values = labels.map((name, i) => {
+                if (statuses[i] === 'Vắng Học') return 98;
+                if (statuses[i] === 'Xem Record') return 98;
+                const val = parseFloat(atRow[name]) - 2 || 0;
+                return Math.min(val, 100);
+            });
+            const colors = statuses.map(st => STATUS_COLORS[st] || STATUS_COLORS['Khác']);
+
+            const ctx = document.getElementById('chartStudentsDay');
+            if (chartStudentsDay) chartStudentsDay.destroy();
+
+            chartStudentsDay = new Chart(ctx, {
+                type: 'bar',
+                data: {
+                    labels,
+                    datasets: [
+                        {
+                            label: 'Điểm (%)',
+                            data: values,
+                            backgroundColor: colors,
+                            barPercentage: 0.85,
+                            categoryPercentage: 0.6
+                        },
+
+                        // ⭐ Dataset line 70% thêm vào đây
+                        {
+                            type: 'line',
+                            label: 'Chuẩn 70%',
+                            data: labels.map(() => 60),
+                            borderColor: '#4da3ff',
+                            borderWidth: 2,
+                            pointRadius: 0,
+                            tension: 0,
+                            borderDash: [6, 6],
+                            order: 99,      // ⭐ đảm bảo nằm trên cùng
+                            yAxisID: 'y'
+                        }
+                    ]
+                },
+
+                options: {
+                    indexAxis: 'x',
+                    layout: { padding: { bottom: 60 } },
+
+                    plugins: {
+                        legend: { display: false },
+
+                        tooltip: {
+                            callbacks: {
+                                label: (ctx) => {
+                                    if (ctx.dataset.type === 'line') return 'Mốc chuẩn: 70%';
+                                    return `${statuses[ctx.dataIndex]} - ${values[ctx.dataIndex].toFixed(2)}%`;
+                                }
+                            }
+                        },
+
+                        title: {
+                            display: true,
+                            text: `Điểm & Trạng thái học viên - ${row['Thông Tin Học Sinh']}`,
+                            padding: { top: 20, bottom: 50 }
+                        }
+                    },
+
+                    scales: {
+                        x: {
+                            ticks: {
+                                color: '#000',
+                                autoSkip: false,
+                                maxRotation: 90,
+                                minRotation: 45
+                            },
+                            grid: { display: false }
+                        },
+
+                        y: {
+                            beginAtZero: true,
+                            max: 100,
+
+                            ticks: { color: '#000', callback: v => v + '%' },
+
+                            grid: {
+                                color: (ctx) => {
+                                    return '#DDD';
+                                },
+                                lineWidth: (ctx) => {
+                                    return 1;
+                                }
+                            },
+
+                            title: { display: true, text: 'Phần trăm (%)', color: '#000' }
+                        }
+                    }
+                },
+
+                // ⭐ Plugin không đổi – vẫn dùng 3D bar, legend, logo
+                plugins: [legendPlugin, logoPlugin(1), bar3DPlugin]
+            });
+
+        }
+
+        // === Heatmap ===
+        function drawHeatmapChart() {
+
+            const LIMIT_DATE = new Date(2025, 10, 3); // 3/11
+            function parseDate(str) {
+                const parts = str.split('/');
+                const day = parseInt(parts[0]);
+                const month = parseInt(parts[1]) - 1;
+                const year = parts[2] ? parseInt(parts[2]) : 2024;
+                return new Date(year, month, day);
+            }
+
+            const filtered = attendanceData.filter(r => parseDate(r['Thông Tin Học Sinh']) > LIMIT_DATE);
+            const recent = filtered;
+            if (!recent.length) return;
+
+            const students = Object.keys(recent[0]).filter(k => k !== 'Thông Tin Học Sinh');
+
+            const absentCount = {};
+            students.forEach(student => {
+                let count = 0;
+                recent.forEach(row => {
+                    const st = normalizeStatus(row[student] || 'Khác');
+                    if (st === 'Vắng Học') count++;
+                });
+                absentCount[student] = count;
+            });
+
+            const activeStudents = Object.keys(absentCount).filter(name => absentCount[name] > 0);
+            const values = activeStudents.map(name => absentCount[name] - 0.1);
+
+            // Màu cột
+            const barColors = values.map(v => (v > 6 ? '#F44336' : '#FFC107'));
+
+            // Line cố định tại mức 6
+            const lineData = activeStudents.map(() => 6);
+
+            const ctx = document.getElementById('chartHeatmap');
+            if (chartHeatmap) chartHeatmap.destroy();
+
+            chartHeatmap = new Chart(ctx, {
+                type: 'bar',
+                data: {
+                    labels: activeStudents,
+                    datasets: [
+                        {
+                            type: 'bar',
+                            label: 'Số buổi vắng học',
+                            data: values,
+                            backgroundColor: barColors,
+                            borderColor: '#333',
+                            barPercentage: 0.85,
+                            categoryPercentage: 0.6
+
+                        },
+                        {
+                            type: 'line',
+                            label: 'Chuẩn tối đa cho phép (6 buổi)',
+                            data: lineData,
+                            borderColor: '#2196F3',
+                            borderWidth: 2,
+                            pointRadius: 0,
+                            borderDash: [5, 5],
+                        }
+                    ]
+                },
+                options: {
+                    plugins: {
+                        legend: {
+                            labels: { color: '#000' }
+                        },
+                        title: {
+                            display: true,
+                            text: 'Số buổi vắng của học viên',
+                            color: '#000',
+                            padding: { top: 20, bottom: 20 }
+                        },
+                        tooltip: {
+                            callbacks: {
+                                label: (ctx) => {
+                                    if (ctx.dataset.type === 'line') return 'Mức giới hạn: 6 buổi';
+                                    return `${ctx.raw} buổi`;
+                                }
+                            }
+                        }
+                    },
+                    scales: {
+                        x: {
+                            ticks: { color: '#000' },
+                            grid: { display: false }
+                        },
+                        y: {
+                            beginAtZero: true,
+                            ticks: { color: '#000', stepSize: 1 },
+                            grid: { color: '#DDD' }
+                        }
+                    }
+                },
+                plugins: [logoPlugin(2), bar3DPluginAbsent]
+            });
+        }
+
+        // === Hàm tải xuống canvas ===
+        function downloadCanvas(id) {
+            const canvas = document.getElementById(id);
+            const link = document.createElement('a');
+            link.download = `${id}_${new Date().toISOString().split('T')[0]}.png`;
+            link.href = canvas.toDataURL('image/png');
+            link.click();
+        }
+
+        function setStatus(msg) { statusEl.textContent = msg; }
+        function generateAttendanceMessage(dayText, rowData) {
+            const entries = Object.entries(rowData)
+                .filter(([k]) => k !== 'Thông Tin Học Sinh')
+                .map(([name, status]) => ({
+                    name,
+                    status: normalizeStatus(status)
+                }));
+
+            // --- Đếm số lượng ---
+            const presentList = entries.filter(e => e.status === 'Đi Học').map(e => e.name);
+            const absentList = entries.filter(e => e.status === 'Vắng Học').map(e => e.name);
+
+            const countPresent = presentList.length;
+            const countAbsent = absentList.length;
+
+            // --- Tag tên ---
+            const absentTags = absentList.map(n => `@${n}`).join(', ') || "Không có";
+
+            // --- Nội dung thông báo (hỗ trợ bold bằng HTML) ---
+            const htmlMessage = `
+📌 <b>Thông báo điểm danh ngày ${dayText}</b><br><br>
+
+Thay mặt trung tâm Fullhouse Dev, anh gửi tới cả lớp thông tin điểm danh buổi học hôm nay:<br>
+<b>Đi học:</b> ${countPresent} bạn<br>
+<b>Vắng học:</b> ${countAbsent} bạn<br><br>
+
+<b>📍 Danh sách vắng học:</b><br>
+${absentTags}<br><br>
+
+📍 <b>LƯU Ý:</b> Trong 01 khóa các bạn được phép nghỉ tối đa <b>06 buổi.</b><br>
+Các bạn nghỉ quá số buổi quy định này sẽ <b>mất một số quyền lợi</b> như:<br>
+<b style="color: #ff4444;">Xem record, làm bài tập web, học kèm riêng, tham gia học với lớp…</b><br><br>
+Các bạn chú ý tham gia đầy đủ để không mất quyền lợi của mình nhé!
+`.trim();
+
+
+            // Tạo khung hiển thị nếu chưa có
+            if (!document.getElementById("attendanceMsgBox")) {
+                const box = document.createElement("div");
+                box.id = "attendanceMsgBox";
+
+                // khung text
+                const div = document.createElement("div");
+                div.id = "attendanceMsg";
+                div.contentEditable = true;
+                div.style.width = "100%";
+                div.style.minHeight = "260px";
+                div.style.marginTop = "20px";
+                div.style.padding = "12px";
+                div.style.borderRadius = "8px";
+                div.style.border = "1px solid var(--border)";
+                div.style.background = "#0b1224";
+                div.style.color = "var(--text)";
+                div.style.fontSize = "14px";
+                div.style.whiteSpace = "pre-wrap";
+                div.style.outline = "none";
+
+                // nút copy
+                const btn = document.createElement("button");
+                btn.textContent = "📋 Copy";
+                btn.style.marginTop = "8px";
+                btn.style.padding = "8px 14px";
+                btn.style.borderRadius = "6px";
+                btn.style.cursor = "pointer";
+                btn.style.background = "var(--accent)";
+                btn.style.color = "white";
+                btn.style.border = "none";
+                btn.onclick = () => copyAttendanceMessage();
+
+                box.appendChild(div);
+                box.appendChild(btn);
+
+                document.querySelector(".wrap").appendChild(box);
+            }
+
+            document.getElementById("attendanceMsg").innerHTML = htmlMessage;
+        }
+
+        function copyAttendanceMessage() {
+            const container = document.getElementById("attendanceMsg");
+
+            // HTML gốc
+            const html = container.innerHTML;
+
+            // Convert HTML → plain text (giữ xuống dòng)
+            let text = html
+                .replace(/<br\s*\/?>/gi, "\n")
+                .replace(/<\/p>/gi, "\n")
+                .replace(/<p[^>]*>/gi, "")
+                .replace(/&nbsp;/g, " ")
+                .replace(/<[^>]+>/g, ""); // xoá mọi thẻ HTML
+
+            // Tạo clipboard item kiểu HTML + Plain text
+            const blobHTML = new Blob([html], { type: "text/html" });
+            const blobText = new Blob([text], { type: "text/plain" });
+
+            const data = new ClipboardItem({
+                "text/html": blobHTML,
+                "text/plain": blobText,
+            });
+
+            navigator.clipboard.write([data]).then(() => {
+                // alert("Đã copy – giữ định dạng đầy đủ!");
+            });
+        }
+
+
+
+
+
+    </script>
+</body>
+
+</html>
