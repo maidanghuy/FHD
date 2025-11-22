@@ -364,6 +364,8 @@
                 ]);
                 attendanceData = attend;
                 atData = at;
+                console.log(attendanceData);
+                console.log(atData);
                 if (!attendanceData.length || !atData.length) throw new Error('Không có dữ liệu hợp lệ.');
                 setStatus(`✅ Đã tải ${attendanceData.length} ngày Attendance_Log & ${atData.length} bản ghi AT.`);
                 renderDayOptions(attendanceData);
@@ -380,26 +382,38 @@
 
             const csv = await res.text();
 
+            // Parse dạng raw (KHÔNG header)
             const parsed = Papa.parse(csv, {
-                header: true,
+                header: false,
                 skipEmptyLines: false
             });
 
-            let rows = parsed.data || [];
-            rows = rows
-                .map(r => {
-                    const cleaned = {};
-                    for (const [k, v] of Object.entries(r)) {
-                        const key = k?.trim();
-                        if (!key) continue;
-                        cleaned[key] = v ? v.trim() : "";
-                    }
-                    return cleaned;
-                })
-                .filter(r => r['Thông Tin Học Sinh']);
+            const rawRows = parsed.data;
+
+            if (!rawRows.length) return [];
+
+            const header = rawRows[0];             // dòng header đầy đủ
+            const dataRows = rawRows.slice(1);     // các dòng dữ liệu
+
+            // Ghép lại thành object — không mất dòng cuối
+            const rows = dataRows
+                .map(r => rowToObject(header, r))
+                .filter(r => r["Thông Tin Học Sinh"]);
 
             return rows;
         }
+
+        function rowToObject(header, row) {
+            const obj = {};
+            header.forEach((key, i) => {
+                const colName = key?.trim();
+                if (!colName) return;
+                obj[colName] = row[i] ? String(row[i]).trim() : "";
+            });
+            return obj;
+        }
+
+
 
         function renderDayOptions(rows) {
             const days = rows.map(r => r['Thông Tin Học Sinh']).filter(Boolean).reverse();;
@@ -552,7 +566,7 @@
 
             const students = allStudents.filter(stu => {
                 const lastStatus = normalizeStatus(latestRow[stu] || 'Khác');
-                return lastStatus === 'Vắng Học' || lastStatus === "Đi Học";
+                return lastStatus === 'Vắng Học' || lastStatus === "Đi Học" || lastStatus === "Lớp Nghỉ";
             });
 
             const absentCount = {};
