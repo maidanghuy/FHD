@@ -377,18 +377,27 @@
             const url = `https://docs.google.com/spreadsheets/d/${sheetId}/gviz/tq?sheet=${sheetName}&range=${range}&tqx=out:csv`;
             const res = await fetch(url);
             if (!res.ok) throw new Error(`Không thể truy cập sheet ${sheetName}`);
+
             const csv = await res.text();
-            const parsed = Papa.parse(csv, { header: true, skipEmptyLines: true });
+
+            const parsed = Papa.parse(csv, {
+                header: true,
+                skipEmptyLines: false
+            });
+
             let rows = parsed.data || [];
-            rows = rows.map(r => {
-                const cleaned = {};
-                for (const [k, v] of Object.entries(r)) {
-                    if (k?.trim() && v?.trim()) cleaned[k.trim()] = v.trim();
-                }
-                return cleaned;
-            })
-                .filter(r => r['Thông Tin Học Sinh'])
-                .filter(r => Object.keys(r).length > 0);
+            rows = rows
+                .map(r => {
+                    const cleaned = {};
+                    for (const [k, v] of Object.entries(r)) {
+                        const key = k?.trim();
+                        if (!key) continue;
+                        cleaned[key] = v ? v.trim() : "";
+                    }
+                    return cleaned;
+                })
+                .filter(r => r['Thông Tin Học Sinh']);
+
             return rows;
         }
 
@@ -524,6 +533,7 @@
         function drawHeatmapChart() {
 
             const LIMIT_DATE = new Date(2025, 10, 3); // 3/11
+
             function parseDate(str) {
                 const parts = str.split('/');
                 const day = parseInt(parts[0]);
@@ -533,15 +543,22 @@
             }
 
             const filtered = attendanceData.filter(r => parseDate(r['Thông Tin Học Sinh']) >= LIMIT_DATE);
-            const recent = filtered;
-            if (!recent.length) return;
+            if (!filtered.length) return;
 
-            const students = Object.keys(recent[0]).filter(k => k !== 'Thông Tin Học Sinh');
+            const latestRow = filtered.at(-1);
+            console.log(latestRow)
+
+            const allStudents = Object.keys(filtered[0]).filter(k => k !== 'Thông Tin Học Sinh');
+
+            const students = allStudents.filter(stu => {
+                const lastStatus = normalizeStatus(latestRow[stu] || 'Khác');
+                return lastStatus === 'Vắng Học' || lastStatus === "Đi Học";
+            });
 
             const absentCount = {};
             students.forEach(student => {
                 let count = 0;
-                recent.forEach(row => {
+                filtered.forEach(row => {
                     const st = normalizeStatus(row[student] || 'Khác');
                     if (st === 'Vắng Học') count++;
                 });
@@ -554,7 +571,7 @@
             // Màu cột
             const barColors = values.map(v => (v > 6 ? '#F44336' : '#FFC107'));
 
-            // Line cố định tại mức 6
+            // Line chuẩn 6 buổi
             const lineData = activeStudents.map(() => 6);
 
             const ctx = document.getElementById('chartHeatmap');
@@ -573,24 +590,21 @@
                             borderColor: '#333',
                             barPercentage: 0.85,
                             categoryPercentage: 0.6
-
                         },
                         {
                             type: 'line',
                             label: 'Chuẩn tối đa cho phép (6 buổi)',
                             data: lineData,
-                            borderColor: '#2196F3',
+                            borderColor: 'rgba(33,150,243,0.25)',
                             borderWidth: 2,
                             pointRadius: 0,
-                            borderDash: [5, 5],
+                            borderDash: [6, 6],
                         }
                     ]
                 },
                 options: {
                     plugins: {
-                        legend: {
-                            labels: { color: '#000' }
-                        },
+                        legend: { labels: { color: '#000' } },
                         title: {
                             display: true,
                             text: 'Số buổi vắng của học viên',
@@ -607,10 +621,7 @@
                         }
                     },
                     scales: {
-                        x: {
-                            ticks: { color: '#000' },
-                            grid: { display: false }
-                        },
+                        x: { ticks: { color: '#000' }, grid: { display: false } },
                         y: {
                             beginAtZero: true,
                             ticks: { color: '#000', stepSize: 1 },
@@ -621,6 +632,7 @@
                 plugins: [logoPlugin(2), bar3DPluginAbsent]
             });
         }
+
 
         // === Hàm tải xuống canvas ===
         function downloadCanvas(id) {
