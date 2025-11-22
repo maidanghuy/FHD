@@ -532,7 +532,7 @@
                 return new Date(year, month, day);
             }
 
-            const filtered = attendanceData.filter(r => parseDate(r['Thông Tin Học Sinh']) > LIMIT_DATE);
+            const filtered = attendanceData.filter(r => parseDate(r['Thông Tin Học Sinh']) >= LIMIT_DATE);
             const recent = filtered;
             if (!recent.length) return;
 
