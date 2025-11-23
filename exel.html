@@ -200,7 +200,7 @@
                 const w = this.logo.width;
                 const h = this.logo.height;
 
-                const x = chartArea.left - (type === 1 ? 110 : 80);
+                const x = chartArea.left - (type === 1 ? 110 : 65);
                 const y = chartArea.top - 145;
 
                 ctx.save();
@@ -412,8 +412,6 @@
             });
             return obj;
         }
-
-
 
         function renderDayOptions(rows) {
             const days = rows.map(r => r['Thông Tin Học Sinh']).filter(Boolean).reverse();;
